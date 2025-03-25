@@ -1,0 +1,5 @@
+prompts.db
+cuebit.egg-info
+cuebit/__pycache__
+.vscode
+poetry.lock

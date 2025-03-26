@@ -2,7 +2,7 @@
 
 Cuebit is an open-source, local-first prompt registry and version control system designed for GenAI development teams — complete with version tracking, version history, lineage tracking, aliases, tagging, and an interactive dashboard.
 
-![alt text](<Cuebit Architecture.png>)
+![alt text](<Cuebit Highlevel Overview.png>)
 
 ---
 
@@ -174,6 +174,8 @@ cuebit export --format json --file exports.json
 - `DELETE /api/v1/prompts/{prompt_id}` - Delete a prompt (soft by default)
 - `GET /api/v1/export` - Export prompts
 - `POST /api/v1/import` - Import prompts
+
+![alt text](<Cuebit Detailed Overview.png>)
 
 ---
 

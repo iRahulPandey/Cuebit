@@ -1,0 +1,179 @@
+[
+  {
+    "prompt_id": "23f7abbe-2416-411a-8b94-dbb99548675d",
+    "project": "content-generator",
+    "task": "summarization",
+    "template": "Summarize this article in a concise way:\n\n{input}",
+    "version": 1,
+    "alias": null,
+    "tags": [
+      "blog",
+      "demo",
+      "important",
+      "summarization",
+      "prod"
+    ],
+    "meta": {
+      "model": "gpt-4",
+      "temperature": 0.7,
+      "max_tokens": 300,
+      "purpose": "Generate short summaries for blog articles"
+    },
+    "parent_id": null,
+    "template_variables": [
+      "input"
+    ],
+    "created_at": "2025-03-26T15:13:23.012291",
+    "updated_at": "2025-03-26T15:13:23.045078",
+    "updated_by": "alice",
+    "examples": [
+      {
+        "input": "The quick brown fox jumps over the lazy dog. The dog didn't move as the agile fox demonstrated its athletic prowess. The fox continued on its journey through the forest.",
+        "output": "A quick fox jumped over a lazy dog and continued through the forest.",
+        "description": "Simple summarization example"
+      }
+    ]
+  },
+  {
+    "prompt_id": "3837a246-04f1-427a-8efb-dbcf3da81687",
+    "project": "customer-support",
+    "task": "question-answering",
+    "template": "Answer the following question based on the given context:\n\nContext: {context}\n\nQuestion: {question}",
+    "version": 1,
+    "alias": "qa-prod",
+    "tags": [
+      "prod",
+      "customer-support",
+      "qa"
+    ],
+    "meta": {
+      "model": "claude-3-opus",
+      "temperature": 0.3,
+      "purpose": "Answer questions based on provided context"
+    },
+    "parent_id": null,
+    "template_variables": [
+      "context",
+      "question"
+    ],
+    "created_at": "2025-03-26T15:13:23.015827",
+    "updated_at": "2025-03-26T15:13:23.022760",
+    "updated_by": "bob",
+    "examples": [
+      {
+        "input": "Context: Our return policy allows items to be returned within 30 days of purchase with a receipt. All electronics have a 14-day return window.\nQuestion: Can I return headphones after 20 days?",
+        "output": "No, you cannot return headphones after 20 days. While our general return policy is 30 days, all electronics (including headphones) have a shorter 14-day return window.",
+        "description": "Return policy question"
+      }
+    ]
+  },
+  {
+    "prompt_id": "42dfd4a0-f979-4d62-bf61-40c13d2aa349",
+    "project": "business-writing",
+    "task": "email-generation",
+    "template": "Write a professional email with the following parameters:\n\nTone: {tone}\nPurpose: {purpose}\nRecipient: {recipient}\nKey points:\n{key_points}",
+    "version": 1,
+    "alias": "email-prod",
+    "tags": [
+      "prod",
+      "email",
+      "business"
+    ],
+    "meta": {
+      "model": "claude-3-opus",
+      "temperature": 0.7,
+      "purpose": "Generate professional emails"
+    },
+    "parent_id": null,
+    "template_variables": [
+      "tone",
+      "purpose",
+      "recipient",
+      "key_points"
+    ],
+    "created_at": "2025-03-26T15:13:23.018644",
+    "updated_at": "2025-03-26T15:13:23.023680",
+    "updated_by": "dave",
+    "examples": [
+      {
+        "input": "tone: Friendly\npurpose: Meeting follow-up\nrecipient: Client\nkey_points: - Thank them for the meeting\n- Summarize key decisions\n- Propose next steps\n- Ask for confirmation",
+        "output": "Dear [Client],\n\nThank you for taking the time to meet with us yesterday. It was great to discuss the project in detail.\n\nTo summarize what we agreed upon:\n- Timeline: 6 weeks for completion\n- Budget: $10,000\n- Deliverables: Website redesign with 5 pages\n\nOur team will begin work next Monday. We propose a check-in call every Friday at 2 PM to share progress.\n\nCould you please confirm these details are correct?\n\nBest regards,\n[Your Name]",
+        "description": "Meeting follow-up email"
+      },
+      {
+        "input": "tone: Formal\npurpose: Job application\nrecipient: Hiring Manager\nkey_points: - Express interest in software developer position\n- Highlight 5 years of Python experience\n- Mention Master's degree in Computer Science\n- Request interview opportunity",
+        "output": "Dear Hiring Manager,\n\nI am writing to express my strong interest in the Software Developer position at [Company Name] as advertised on your website.\n\nWith five years of professional experience developing Python applications and a Master's degree in Computer Science, I believe I have the technical expertise and background that would make me a valuable addition to your team.\n\nI would welcome the opportunity to discuss how my skills align with your needs in an interview. I am available at your convenience and can be reached at [phone number] or [email].\n\nThank you for considering my application. I look forward to the possibility of working with your team.\n\nSincerely,\n[Your Name]",
+        "description": "Job application email"
+      }
+    ]
+  },
+  {
+    "prompt_id": "ec11e3c3-981b-423b-af37-f02fb947f82a",
+    "project": "content-generator",
+    "task": "summarization",
+    "template": "Provide a concise summary of this article in 2-3 sentences:\n\n{input}",
+    "version": 2,
+    "alias": null,
+    "tags": [
+      "blog",
+      "demo",
+      "important",
+      "summarization",
+      "concise",
+      "prod"
+    ],
+    "meta": {
+      "model": "gpt-4",
+      "temperature": 0.5,
+      "max_tokens": 250,
+      "purpose": "Generate short summaries for blog articles",
+      "version_notes": "Improved directive for conciseness"
+    },
+    "parent_id": "23f7abbe-2416-411a-8b94-dbb99548675d",
+    "template_variables": [
+      "input"
+    ],
+    "created_at": "2025-03-26T15:13:23.026729",
+    "updated_at": "2025-03-26T15:13:23.046493",
+    "updated_by": "alice",
+    "examples": [
+      {
+        "input": "Climate change is a global challenge that requires immediate action. The Earth's average temperature has increased by about 1 degree Celsius since pre-industrial times, primarily due to human activities like burning fossil fuels. This warming is causing more extreme weather events, rising sea levels, and disruption to ecosystems worldwide. Scientists warn that limiting warming to 1.5 degrees Celsius would significantly reduce these risks.",
+        "output": "Climate change, driven primarily by human activities like fossil fuel use, has increased Earth's temperature by 1\u00b0C since pre-industrial times. This warming is causing extreme weather, rising seas, and ecosystem disruption, with scientists recommending limiting warming to 1.5\u00b0C to reduce these effects.",
+        "description": "Climate change summary example"
+      }
+    ]
+  },
+  {
+    "prompt_id": "11f37a02-7348-4fba-adfa-bdb1ddb98082",
+    "project": "content-generator",
+    "task": "summarization",
+    "template": "Summarize this article in 1-2 sentences using simple, clear language:\n\n{input}",
+    "version": 3,
+    "alias": "summarizer-prod",
+    "tags": [
+      "simple-language",
+      "blog",
+      "demo",
+      "important",
+      "summarization",
+      "concise",
+      "prod"
+    ],
+    "meta": {
+      "model": "gpt-4",
+      "temperature": 0.4,
+      "max_tokens": 200,
+      "purpose": "Generate very short summaries for blog articles",
+      "version_notes": "Simplified output further, specified sentence count"
+    },
+    "parent_id": "ec11e3c3-981b-423b-af37-f02fb947f82a",
+    "template_variables": [
+      "input"
+    ],
+    "created_at": "2025-03-26T15:13:23.028213",
+    "updated_at": "2025-03-26T15:13:23.047187",
+    "updated_by": "ellie",
+    "examples": []
+  }
+]

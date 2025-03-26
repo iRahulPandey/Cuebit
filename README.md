@@ -191,7 +191,10 @@ cuebit/
 ├── cuebit_dashboard.py  # Streamlit dashboard
 ├── pyproject.toml    # Project metadata
 ├── README.md
-└── example.py        # Example usage script
+└── examples          # Example
+│   ├── e2e_example.py
+│   ├── register_prompts.py
+│   └── summarization_app.py 
 ```
 
 ---

@@ -1,16 +1,42 @@
+"""
+Core registry module for Cuebit prompt management.
+
+This module provides the main PromptRegistry class that handles
+storing, retrieving, and versioning prompt templates with full
+version history and lineage tracking.
+"""
+
 import uuid
 import json
 import re
+import os
+import appdirs
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Union
 from collections import Counter, defaultdict
+import copy
 
 from sqlalchemy import (
     create_engine, Column, String, Integer, DateTime, 
     Text, JSON, ForeignKey, Boolean, Float, func, and_, or_
 )
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship, backref
+from sqlalchemy.orm import sessionmaker, relationship, backref, Session
+from sqlalchemy.orm.exc import DetachedInstanceError
+
+# Get application data directory
+APP_NAME = "cuebit"
+APP_AUTHOR = "cuebit"
+
+def get_default_db_path():
+    """Get the default database path in the user's data directory."""
+    user_data_dir = appdirs.user_data_dir(APP_NAME, APP_AUTHOR)
+    
+    # Ensure the directory exists
+    os.makedirs(user_data_dir, exist_ok=True)
+    
+    # Return database path
+    return os.path.join(user_data_dir, "prompts.db")
 
 Base = declarative_base()
 
@@ -59,6 +85,20 @@ class PromptORM(Base):
         foreign_keys=[parent_id]
     )
 
+    def to_dict(self):
+        """Convert ORM object to dictionary for serialization"""
+        data = {}
+        for column in self.__table__.columns:
+            value = getattr(self, column.name)
+            
+            # Handle special types
+            if isinstance(value, datetime):
+                value = value.isoformat()
+                
+            data[column.name] = value
+            
+        return data
+
 # Junction table for many-to-many prompt-tag relationship
 class PromptTagORM(Base):
     """
@@ -95,6 +135,17 @@ class ExampleORM(Base):
     description = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    def to_dict(self):
+        """Convert ORM object to dictionary for serialization"""
+        return {
+            "id": self.id,
+            "prompt_id": self.prompt_id,
+            "input": self.input_text,
+            "output": self.output_text,
+            "description": self.description,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
 
 class PromptRegistry:
     """
@@ -105,27 +156,43 @@ class PromptRegistry:
     by project and task.
     """
     
-    def __init__(self, db_url: str = "sqlite:///prompts.db"):
+    def __init__(self, db_url: Optional[str] = None):
         """
         Initialize the prompt registry with a database connection.
         
         Args:
-            db_url (str): SQLAlchemy database URL. Defaults to local SQLite.
+            db_url (str, optional): SQLAlchemy database URL. If None, will be determined in this order:
+                1. CUEBIT_DB_PATH environment variable
+                2. Standard user data directory
+                3. Local file "prompts.db" in current directory (legacy behavior)
         """
+        if db_url is None:
+            # Check environment variable first
+            db_url = os.environ.get("CUEBIT_DB_PATH")
+            
+            if db_url is None:
+                # Then try standard user data directory
+                default_db = get_default_db_path()
+                db_url = f"sqlite:///{default_db}"
+                
+        # Store the database URL for reference
+        self.db_url = db_url
+        
+        # Initialize database connection
         self.engine = create_engine(db_url, echo=False)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
     def register_prompt(
-        self,
-        task: str,
-        template: str,
-        meta: dict,
-        tags: List[str] = [],
-        project: Optional[str] = None,
-        updated_by: Optional[str] = None,
-        examples: Optional[List[Dict[str, str]]] = None
-    ) -> PromptORM:
+            self,
+            task: str,
+            template: str,
+            meta: dict = {},
+            tags: List[str] = [],
+            project: Optional[str] = None,
+            updated_by: Optional[str] = None,
+            examples: Optional[List[Dict[str, str]]] = None
+        ) -> PromptORM:
         """
         Register a new prompt template with metadata.
         
@@ -156,63 +223,68 @@ class PromptRegistry:
             ... )
         """
         session = self.Session()
-        prompt_id = str(uuid.uuid4())
+        try:
+            prompt_id = str(uuid.uuid4())
 
-        # Auto-increment version within project/task
-        version = 1
-        if project and task:
-            latest_version = (
-                session.query(func.max(PromptORM.version))
-                .filter(
-                    PromptORM.project == project,
-                    PromptORM.task == task,
-                    PromptORM.is_deleted == False
+            # Auto-increment version within project/task
+            version = 1
+            if project and task:
+                latest_version = (
+                    session.query(func.max(PromptORM.version))
+                    .filter(
+                        PromptORM.project == project,
+                        PromptORM.task == task,
+                        PromptORM.is_deleted == False
+                    )
+                    .scalar()
                 )
-                .scalar()
+                if latest_version:
+                    version = latest_version + 1
+
+            # Extract template variables
+            template_vars = re.findall(r'\{([^{}]*)\}', template)
+            
+            new_prompt = PromptORM(
+                prompt_id=prompt_id,
+                project=project,
+                task=task,
+                template=template,
+                version=version,
+                alias=None,
+                tags=json.dumps(tags),
+                meta=meta,
+                template_variables=template_vars,
+                updated_by=updated_by,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
             )
-            if latest_version:
-                version = latest_version + 1
-
-        # Extract template variables
-        template_vars = re.findall(r'\{([^{}]*)\}', template)
-        
-        new_prompt = PromptORM(
-            prompt_id=prompt_id,
-            project=project,
-            task=task,
-            template=template,
-            version=version,
-            alias=None,
-            tags=json.dumps(tags),
-            meta=meta,
-            template_variables=template_vars,
-            updated_by=updated_by,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        session.add(new_prompt)
-        
-        # Process tags
-        for tag in tags:
-            if tag:
-                prompt_tag = PromptTagORM(prompt_id=prompt_id, tag_name=tag)
-                session.add(prompt_tag)
-        
-        # Add examples if provided
-        if examples:
-            for ex in examples:
-                example = ExampleORM(
-                    prompt_id=prompt_id,
-                    input_text=ex.get("input", ""),
-                    output_text=ex.get("output", ""),
-                    description=ex.get("description")
-                )
-                session.add(example)
-        
-        session.commit()
-        session.refresh(new_prompt)
-        session.close()
-        return new_prompt
+            session.add(new_prompt)
+            
+            # Process tags
+            for tag in tags:
+                if tag:
+                    prompt_tag = PromptTagORM(prompt_id=prompt_id, tag_name=tag)
+                    session.add(prompt_tag)
+            
+            # Add examples if provided
+            if examples:
+                for ex in examples:
+                    example = ExampleORM(
+                        prompt_id=prompt_id,
+                        input_text=ex.get("input", ""),
+                        output_text=ex.get("output", ""),
+                        description=ex.get("description")
+                    )
+                    session.add(example)
+            
+            session.commit()
+            session.refresh(new_prompt)
+            
+            # Make a copy to avoid DetachedInstanceError after session close
+            result = copy.deepcopy(new_prompt)
+            return result
+        finally:
+            session.close()
 
     def get_prompt(self, prompt_id: str, include_deleted: bool = False) -> Optional[PromptORM]:
         """
@@ -231,14 +303,21 @@ class PromptRegistry:
             "Summarize this text: {input}"
         """
         session = self.Session()
-        query = session.query(PromptORM).filter_by(prompt_id=prompt_id)
-        
-        if not include_deleted:
-            query = query.filter_by(is_deleted=False)
+        try:
+            query = session.query(PromptORM).filter_by(prompt_id=prompt_id)
             
-        prompt = query.first()
-        session.close()
-        return prompt
+            if not include_deleted:
+                query = query.filter_by(is_deleted=False)
+                
+            prompt = query.first()
+            
+            # Handle SQLAlchemy detached instance issue
+            if prompt:
+                session.expunge(prompt)
+                
+            return prompt
+        finally:
+            session.close()
 
     def get_prompt_by_alias(self, alias: str) -> Optional[PromptORM]:
         """
@@ -256,12 +335,19 @@ class PromptRegistry:
             "Summarize this text: {input}"
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(
-            alias=alias,
-            is_deleted=False
-        ).first()
-        session.close()
-        return prompt
+        try:
+            prompt = session.query(PromptORM).filter_by(
+                alias=alias,
+                is_deleted=False
+            ).first()
+            
+            # Handle SQLAlchemy detached instance issue
+            if prompt:
+                session.expunge(prompt)
+                
+            return prompt
+        finally:
+            session.close()
 
     def list_prompts(
         self, 
@@ -295,42 +381,49 @@ class PromptRegistry:
             "Found 45 prompts, showing 20"
         """
         session = self.Session()
-        query = session.query(PromptORM)
-        
-        # Apply filters
-        if not include_deleted:
-            query = query.filter_by(is_deleted=False)
+        try:
+            query = session.query(PromptORM)
             
-        if search_term:
-            search_pattern = f"%{search_term}%"
-            query = query.filter(
-                or_(
-                    PromptORM.template.ilike(search_pattern),
-                    PromptORM.task.ilike(search_pattern),
-                    PromptORM.project.ilike(search_pattern)
-                )
-            )
-            
-        if tag_filter:
-            # This is more complex with proper tag schema - using simplified approach
-            for tag in tag_filter:
-                tag_pattern = f"%\"{tag}\"%"  # Match in JSON array
-                query = query.filter(PromptORM.tags.ilike(tag_pattern))
+            # Apply filters
+            if not include_deleted:
+                query = query.filter_by(is_deleted=False)
                 
-        # Count total for pagination
-        total_count = query.count()
-        
-        # Apply pagination
-        query = query.order_by(
-            PromptORM.project, 
-            PromptORM.task, 
-            PromptORM.version.desc()
-        )
-        query = query.offset((page - 1) * page_size).limit(page_size)
-        
-        prompts = query.all()
-        session.close()
-        return prompts, total_count
+            if search_term:
+                search_pattern = f"%{search_term}%"
+                query = query.filter(
+                    or_(
+                        PromptORM.template.ilike(search_pattern),
+                        PromptORM.task.ilike(search_pattern),
+                        PromptORM.project.ilike(search_pattern)
+                    )
+                )
+                
+            if tag_filter:
+                # This is more complex with proper tag schema - using simplified approach
+                for tag in tag_filter:
+                    tag_pattern = f"%\"{tag}\"%"  # Match in JSON array
+                    query = query.filter(PromptORM.tags.ilike(tag_pattern))
+                    
+            # Count total for pagination
+            total_count = query.count()
+            
+            # Apply pagination
+            query = query.order_by(
+                PromptORM.project, 
+                PromptORM.task, 
+                PromptORM.version.desc()
+            )
+            query = query.offset((page - 1) * page_size).limit(page_size)
+            
+            prompts = query.all()
+            
+            # Handle SQLAlchemy detached instance issue
+            for prompt in prompts:
+                session.expunge(prompt)
+                
+            return prompts, total_count
+        finally:
+            session.close()
 
     def list_projects(self) -> List[str]:
         """
@@ -345,12 +438,14 @@ class PromptRegistry:
             ["blog-generator", "customer-support", "marketing"]
         """
         session = self.Session()
-        query = session.query(PromptORM.project).distinct()
-        query = query.filter_by(is_deleted=False)
-        
-        projects = query.all()
-        session.close()
-        return [p[0] or "Unassigned" for p in projects]
+        try:
+            query = session.query(PromptORM.project).distinct()
+            query = query.filter_by(is_deleted=False)
+            
+            projects = query.all()
+            return [p[0] or "Unassigned" for p in projects]
+        finally:
+            session.close()
 
     def list_prompts_by_project(
         self, 
@@ -376,14 +471,21 @@ class PromptRegistry:
             "title-generator v1"
         """
         session = self.Session()
-        query = session.query(PromptORM).filter_by(project=project)
-        
-        if not include_deleted:
-            query = query.filter_by(is_deleted=False)
+        try:
+            query = session.query(PromptORM).filter_by(project=project)
             
-        prompts = query.all()
-        session.close()
-        return prompts
+            if not include_deleted:
+                query = query.filter_by(is_deleted=False)
+                
+            prompts = query.all()
+            
+            # Handle SQLAlchemy detached instance issue
+            for prompt in prompts:
+                session.expunge(prompt)
+                
+            return prompts
+        finally:
+            session.close()
 
     def get_tag_stats(self) -> Counter:
         """
@@ -398,19 +500,20 @@ class PromptRegistry:
             [("prod", 15), ("summarization", 10), ("qa", 7)]
         """
         session = self.Session()
-        
-        tag_counts = Counter()
-        tag_entries = session.query(PromptTagORM.tag_name, func.count(PromptTagORM.id))\
-            .join(PromptORM, PromptORM.prompt_id == PromptTagORM.prompt_id)\
-            .filter(PromptORM.is_deleted == False)\
-            .group_by(PromptTagORM.tag_name)\
-            .all()
-            
-        for tag_name, count in tag_entries:
-            tag_counts[tag_name] = count
+        try:
+            tag_counts = Counter()
+            tag_entries = session.query(PromptTagORM.tag_name, func.count(PromptTagORM.id))\
+                .join(PromptORM, PromptORM.prompt_id == PromptTagORM.prompt_id)\
+                .filter(PromptORM.is_deleted == False)\
+                .group_by(PromptTagORM.tag_name)\
+                .all()
                 
-        session.close()
-        return tag_counts
+            for tag_name, count in tag_entries:
+                tag_counts[tag_name] = count
+                    
+            return tag_counts
+        finally:
+            session.close()
 
     def add_alias(
         self, 
@@ -436,37 +539,43 @@ class PromptRegistry:
             "summarizer-prod"
         """
         session = self.Session()
-        
-        # Check if alias already exists
-        if not overwrite:
-            existing = session.query(PromptORM).filter_by(
-                alias=alias,
+        try:
+            # Check if alias already exists
+            if not overwrite:
+                existing = session.query(PromptORM).filter_by(
+                    alias=alias,
+                    is_deleted=False
+                ).first()
+                
+                if existing:
+                    return None
+            
+            # Find the prompt and update it
+            prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
                 is_deleted=False
             ).first()
             
-            if existing:
-                session.close()
-                return None
-        
-        # Find the prompt and update it
-        prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=False
-        ).first()
-        
-        if prompt:
-            # Remove this alias from any other prompts
-            session.query(PromptORM).filter_by(
-                alias=alias,
-                is_deleted=False
-            ).update({"alias": None})
+            if prompt:
+                # Remove this alias from any other prompts
+                session.query(PromptORM).filter_by(
+                    alias=alias,
+                    is_deleted=False
+                ).update({"alias": None})
+                
+                # Set the alias on the target prompt
+                prompt.alias = alias
+                session.commit()
+                session.refresh(prompt)
+                
+                # Handle SQLAlchemy detached instance issue
+                result = copy.deepcopy(prompt)
+                session.expunge(prompt)
+                return result
             
-            # Set the alias on the target prompt
-            prompt.alias = alias
-            session.commit()
-            
-        session.close()
-        return prompt
+            return None
+        finally:
+            session.close()
 
     def update_prompt(
         self, 
@@ -502,76 +611,81 @@ class PromptRegistry:
             "New version: 2"
         """
         session = self.Session()
-        old_prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=False
-        ).first()
-        
-        if not old_prompt:
-            session.close()
-            return None
-
-        # Get the latest version for this project/task
-        latest_version = (
-            session.query(func.max(PromptORM.version))
-            .filter_by(
-                project=old_prompt.project, 
-                task=old_prompt.task,
+        try:
+            old_prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
                 is_deleted=False
-            )
-            .scalar()
-        )
-        new_version = (latest_version or 0) + 1
-
-        # Extract template variables
-        template_vars = re.findall(r'\{([^{}]*)\}', new_template)
-        
-        # Use existing tags if not provided
-        if tags is None:
-            try:
-                tags = json.loads(old_prompt.tags or "[]")
-            except:
-                tags = []
-                
-        # Create new prompt version with parent-child relationship
-        new_prompt = PromptORM(
-            prompt_id=str(uuid.uuid4()),
-            project=old_prompt.project,
-            task=old_prompt.task,
-            template=new_template,
-            version=new_version,
-            alias=None,  # Don't automatically transfer alias
-            tags=json.dumps(tags),
-            meta=meta or old_prompt.meta,
-            parent_id=old_prompt.prompt_id,  # Set parent reference
-            template_variables=template_vars,
-            updated_by=updated_by,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        session.add(new_prompt)
-        
-        # Process tags
-        for tag in tags:
-            if tag:
-                prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
-                session.add(prompt_tag)
-                
-        # Add examples if provided
-        if examples:
-            for ex in examples:
-                example = ExampleORM(
-                    prompt_id=new_prompt.prompt_id,
-                    input_text=ex.get("input", ""),
-                    output_text=ex.get("output", ""),
-                    description=ex.get("description")
-                )
-                session.add(example)
+            ).first()
             
-        session.commit()
-        session.refresh(new_prompt)
-        session.close()
-        return new_prompt
+            if not old_prompt:
+                return None
+
+            # Get the latest version for this project/task
+            latest_version = (
+                session.query(func.max(PromptORM.version))
+                .filter_by(
+                    project=old_prompt.project, 
+                    task=old_prompt.task,
+                    is_deleted=False
+                )
+                .scalar()
+            )
+            new_version = (latest_version or 0) + 1
+
+            # Extract template variables
+            template_vars = re.findall(r'\{([^{}]*)\}', new_template)
+            
+            # Use existing tags if not provided
+            if tags is None:
+                try:
+                    tags = json.loads(old_prompt.tags or "[]")
+                except:
+                    tags = []
+                    
+            # Create new prompt version with parent-child relationship
+            new_prompt = PromptORM(
+                prompt_id=str(uuid.uuid4()),
+                project=old_prompt.project,
+                task=old_prompt.task,
+                template=new_template,
+                version=new_version,
+                alias=None,  # Don't automatically transfer alias
+                tags=json.dumps(tags),
+                meta=meta or old_prompt.meta,
+                parent_id=old_prompt.prompt_id,  # Set parent reference
+                template_variables=template_vars,
+                updated_by=updated_by,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            session.add(new_prompt)
+            
+            # Process tags
+            for tag in tags:
+                if tag:
+                    prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
+                    session.add(prompt_tag)
+                    
+            # Add examples if provided
+            if examples:
+                for ex in examples:
+                    example = ExampleORM(
+                        prompt_id=new_prompt.prompt_id,
+                        input_text=ex.get("input", ""),
+                        output_text=ex.get("output", ""),
+                        description=ex.get("description")
+                    )
+                    session.add(example)
+                
+            session.commit()
+            session.refresh(new_prompt)
+            
+            # Handle SQLAlchemy detached instance issue
+            result = copy.deepcopy(new_prompt)
+            session.expunge(new_prompt)
+            return result
+        finally:
+            session.close()
 
     def get_version_history(
         self, 
@@ -599,24 +713,25 @@ class PromptRegistry:
             "v3 by bob on 2023-02-05"
         """
         session = self.Session()
-        query = session.query(PromptORM).filter_by(
-            project=project,
-            task=task
-        )
-        
-        if not include_deleted:
-            query = query.filter_by(is_deleted=False)
+        try:
+            query = session.query(PromptORM).filter_by(
+                project=project,
+                task=task
+            )
             
-        # Get all versions ordered by version number
-        versions = query.order_by(PromptORM.version).all()
-        
-        # We need to make sure the objects are still usable after the session is closed
-        # One option is to convert them to dictionaries, but we'll avoid that for now
-        # and simply return the ORM objects
-        
-        # Close the session before returning
-        session.close()
-        return versions
+            if not include_deleted:
+                query = query.filter_by(is_deleted=False)
+                
+            # Get all versions ordered by version number
+            versions = query.order_by(PromptORM.version).all()
+            
+            # Handle SQLAlchemy detached instance issue
+            for version in versions:
+                session.expunge(version)
+                
+            return versions
+        finally:
+            session.close()
 
     def get_prompt_lineage(
         self, 
@@ -639,57 +754,61 @@ class PromptRegistry:
             "Ancestors: 2, Descendants: 1"
         """
         session = self.Session()
-        result = {
-            "ancestors": [],
-            "current": None,
-            "descendants": []
-        }
-        
-        # Get the current prompt
-        current = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
-        if not current:
-            session.close()
+        try:
+            result = {
+                "ancestors": [],
+                "current": None,
+                "descendants": []
+            }
+            
+            # Get the current prompt
+            current = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
+            if not current:
+                return result
+                
+            # Handle SQLAlchemy detached instance issue
+            result["current"] = copy.deepcopy(current)
+            
+            # Get ancestors (follow parent_id recursively)
+            ancestor = current
+            while ancestor.parent_id:
+                parent_query = session.query(PromptORM).filter_by(prompt_id=ancestor.parent_id)
+                if not include_deleted:
+                    parent_query = parent_query.filter_by(is_deleted=False)
+                    
+                parent = parent_query.first()
+                if parent:
+                    # Handle SQLAlchemy detached instance issue
+                    result["ancestors"].append(copy.deepcopy(parent))
+                    ancestor = parent
+                else:
+                    break
+                    
+            # Reverse so oldest is first
+            result["ancestors"].reverse()
+            
+            # Get descendants (follow children recursively)
+            def get_children(parent_id):
+                children_query = session.query(PromptORM).filter_by(parent_id=parent_id)
+                if not include_deleted:
+                    children_query = children_query.filter_by(is_deleted=False)
+                    
+                return children_query.all()
+                
+            descendants = []
+            to_process = get_children(prompt_id)
+            
+            while to_process:
+                child = to_process.pop(0)
+                # Handle SQLAlchemy detached instance issue
+                descendants.append(copy.deepcopy(child))
+                to_process.extend(get_children(child.prompt_id))
+                
+            result["descendants"] = descendants
+            
             return result
-            
-        result["current"] = current
-        
-        # Get ancestors (follow parent_id recursively)
-        ancestor = current
-        while ancestor.parent_id:
-            parent_query = session.query(PromptORM).filter_by(prompt_id=ancestor.parent_id)
-            if not include_deleted:
-                parent_query = parent_query.filter_by(is_deleted=False)
-                
-            parent = parent_query.first()
-            if parent:
-                result["ancestors"].append(parent)
-                ancestor = parent
-            else:
-                break
-                
-        # Reverse so oldest is first
-        result["ancestors"].reverse()
-        
-        # Get descendants (follow children recursively)
-        def get_children(parent_id):
-            children_query = session.query(PromptORM).filter_by(parent_id=parent_id)
-            if not include_deleted:
-                children_query = children_query.filter_by(is_deleted=False)
-                
-            return children_query.all()
-            
-        descendants = []
-        to_process = get_children(prompt_id)
-        
-        while to_process:
-            child = to_process.pop(0)
-            descendants.append(child)
-            to_process.extend(get_children(child.prompt_id))
-            
-        result["descendants"] = descendants
-        
-        session.close()
-        return result
+        finally:
+            session.close()
 
     def compare_versions(
         self, 
@@ -717,83 +836,88 @@ class PromptRegistry:
         import difflib
         
         session = self.Session()
-        prompt1 = session.query(PromptORM).filter_by(prompt_id=prompt_id_1).first()
-        prompt2 = session.query(PromptORM).filter_by(prompt_id=prompt_id_2).first()
-        
-        if not prompt1 or not prompt2:
-            session.close()
-            return {"error": "One or both prompts not found"}
+        try:
+            prompt1 = session.query(PromptORM).filter_by(prompt_id=prompt_id_1).first()
+            prompt2 = session.query(PromptORM).filter_by(prompt_id=prompt_id_2).first()
             
-        # Compare templates
-        template_diff = list(difflib.ndiff(
-            prompt1.template.splitlines(),
-            prompt2.template.splitlines()
-        ))
-        
-        # Compare metadata
-        meta1 = prompt1.meta or {}
-        meta2 = prompt2.meta or {}
-        
-        meta_changes = {
-            "added": {},
-            "removed": {},
-            "changed": {}
-        }
-        
-        all_keys = set(meta1.keys()) | set(meta2.keys())
-        for key in all_keys:
-            if key not in meta1:
-                meta_changes["added"][key] = meta2[key]
-            elif key not in meta2:
-                meta_changes["removed"][key] = meta1[key]
-            elif meta1[key] != meta2[key]:
-                meta_changes["changed"][key] = {
-                    "from": meta1[key],
-                    "to": meta2[key]
-                }
+            if not prompt1 or not prompt2:
+                return {"error": "One or both prompts not found"}
                 
-        # Compare tags
-        tags1 = set(json.loads(prompt1.tags or "[]"))
-        tags2 = set(json.loads(prompt2.tags or "[]"))
-        
-        tags_added = list(tags2 - tags1)
-        tags_removed = list(tags1 - tags2)
-        
-        # Compare variables
-        vars1 = set(prompt1.template_variables or [])
-        vars2 = set(prompt2.template_variables or [])
-        
-        vars_added = list(vars2 - vars1)
-        vars_removed = list(vars1 - vars2)
-        
-        session.close()
-        
-        return {
-            "template_diff": template_diff,
-            "meta_changes": meta_changes,
-            "tags_changes": {
-                "added": tags_added,
-                "removed": tags_removed
-            },
-            "variables_changes": {
-                "added": vars_added,
-                "removed": vars_removed
-            },
-            "prompts": {
-                "first": {
-                    "prompt_id": prompt1.prompt_id,
-                    "version": prompt1.version,
-                    "updated_by": prompt1.updated_by,
-                    "updated_at": prompt1.updated_at
+            # Compare templates
+            template_diff = list(difflib.ndiff(
+                prompt1.template.splitlines(),
+                prompt2.template.splitlines()
+            ))
+            
+            # Compare metadata
+            meta1 = prompt1.meta or {}
+            meta2 = prompt2.meta or {}
+            
+            meta_changes = {
+                "added": {},
+                "removed": {},
+                "changed": {}
+            }
+            
+            all_keys = set(meta1.keys()) | set(meta2.keys())
+            for key in all_keys:
+                if key not in meta1:
+                    meta_changes["added"][key] = meta2[key]
+                elif key not in meta2:
+                    meta_changes["removed"][key] = meta1[key]
+                elif meta1[key] != meta2[key]:
+                    meta_changes["changed"][key] = {
+                        "from": meta1[key],
+                        "to": meta2[key]
+                    }
+                    
+            # Compare tags
+            tags1 = set(json.loads(prompt1.tags or "[]"))
+            tags2 = set(json.loads(prompt2.tags or "[]"))
+            
+            tags_added = list(tags2 - tags1)
+            tags_removed = list(tags1 - tags2)
+            
+            # Compare variables
+            vars1 = set(prompt1.template_variables or [])
+            vars2 = set(prompt2.template_variables or [])
+            
+            vars_added = list(vars2 - vars1)
+            vars_removed = list(vars1 - vars2)
+            
+            # Prepare prompts for output (avoid serialization issues)
+            prompt1_dict = {
+                "prompt_id": prompt1.prompt_id,
+                "version": prompt1.version,
+                "updated_by": prompt1.updated_by,
+                "updated_at": prompt1.updated_at.isoformat() if prompt1.updated_at else None
+            }
+            
+            prompt2_dict = {
+                "prompt_id": prompt2.prompt_id,
+                "version": prompt2.version,
+                "updated_by": prompt2.updated_by,
+                "updated_at": prompt2.updated_at.isoformat() if prompt2.updated_at else None
+            }
+            
+            return {
+                "template_diff": template_diff,
+                "meta_changes": meta_changes,
+                "tags_changes": {
+                    "added": tags_added,
+                    "removed": tags_removed
                 },
-                "second": {
-                    "prompt_id": prompt2.prompt_id,
-                    "version": prompt2.version,
-                    "updated_by": prompt2.updated_by,
-                    "updated_at": prompt2.updated_at
+                "variables_changes": {
+                    "added": vars_added,
+                    "removed": vars_removed
+                },
+                "prompts": {
+                    "first": prompt1_dict,
+                    "second": prompt2_dict
                 }
             }
-        }
+        finally:
+            session.close()
 
     def rollback_to_version(
         self, 
@@ -819,67 +943,74 @@ class PromptRegistry:
             "Rolled back to create v4"
         """
         session = self.Session()
-        old_prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=False
-        ).first()
-        
-        if not old_prompt:
-            session.close()
-            return None
-            
-        # Get latest version
-        latest_version = (
-            session.query(func.max(PromptORM.version))
-            .filter_by(
-                project=old_prompt.project, 
-                task=old_prompt.task,
-                is_deleted=False
-            )
-            .scalar() or 0
-        )
-        
-        # Create new version based on old one
-        new_prompt = PromptORM(
-            prompt_id=str(uuid.uuid4()),
-            project=old_prompt.project,
-            task=old_prompt.task,
-            template=old_prompt.template,  # Copy the old template
-            version=latest_version + 1,
-            alias=None,  # Don't transfer alias
-            tags=old_prompt.tags,
-            meta=old_prompt.meta.copy() if old_prompt.meta else {},
-            parent_id=old_prompt.prompt_id,  # Link to source
-            template_variables=old_prompt.template_variables,
-            updated_by=updated_by,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        
-        # Add metadata about rollback
-        new_prompt.meta["rollback"] = {
-            "from_version": old_prompt.version,
-            "from_id": old_prompt.prompt_id,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        session.add(new_prompt)
-        
-        # Copy tags
         try:
-            tags = json.loads(old_prompt.tags or "[]")
-            for tag in tags:
-                if tag:
-                    prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
-                    session.add(prompt_tag)
-        except:
-            pass
-        
-        session.commit()
-        session.refresh(new_prompt)
-        session.close()
-        
-        return new_prompt
+            old_prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
+                is_deleted=False
+            ).first()
+            
+            if not old_prompt:
+                return None
+                
+            # Get latest version
+            latest_version = (
+                session.query(func.max(PromptORM.version))
+                .filter_by(
+                    project=old_prompt.project, 
+                    task=old_prompt.task,
+                    is_deleted=False
+                )
+                .scalar() or 0
+            )
+            
+            # Create new version based on old one
+            new_prompt = PromptORM(
+                prompt_id=str(uuid.uuid4()),
+                project=old_prompt.project,
+                task=old_prompt.task,
+                template=old_prompt.template,  # Copy the old template
+                version=latest_version + 1,
+                alias=None,  # Don't transfer alias
+                tags=old_prompt.tags,
+                meta=old_prompt.meta.copy() if old_prompt.meta else {},
+                parent_id=old_prompt.prompt_id,  # Link to source
+                template_variables=old_prompt.template_variables,
+                updated_by=updated_by,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            
+            # Add metadata about rollback
+            if new_prompt.meta is None:
+                new_prompt.meta = {}
+                
+            new_prompt.meta["rollback"] = {
+                "from_version": old_prompt.version,
+                "from_id": old_prompt.prompt_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            session.add(new_prompt)
+            
+            # Copy tags
+            try:
+                tags = json.loads(old_prompt.tags or "[]")
+                for tag in tags:
+                    if tag:
+                        prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
+                        session.add(prompt_tag)
+            except:
+                pass
+            
+            session.commit()
+            session.refresh(new_prompt)
+            
+            # Handle SQLAlchemy detached instance issue
+            result = copy.deepcopy(new_prompt)
+            session.expunge(new_prompt)
+            return result
+        finally:
+            session.close()
 
     def soft_delete_prompt(
         self, 
@@ -905,31 +1036,32 @@ class PromptRegistry:
             "Deleted: True"
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
-        
-        if not prompt:
+        try:
+            prompt = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
+            
+            if not prompt:
+                return False
+                
+            # Mark as deleted
+            prompt.is_deleted = True
+            
+            # Record who deleted
+            if prompt.meta is None:
+                prompt.meta = {}
+                
+            prompt.meta["deleted"] = {
+                "by": deleted_by,
+                "at": datetime.utcnow().isoformat()
+            }
+            
+            # Remove any aliases
+            if prompt.alias:
+                prompt.alias = None
+                
+            session.commit()
+            return True
+        finally:
             session.close()
-            return False
-            
-        # Mark as deleted
-        prompt.is_deleted = True
-        
-        # Record who deleted
-        if prompt.meta is None:
-            prompt.meta = {}
-            
-        prompt.meta["deleted"] = {
-            "by": deleted_by,
-            "at": datetime.utcnow().isoformat()
-        }
-        
-        # Remove any aliases
-        if prompt.alias:
-            prompt.alias = None
-            
-        session.commit()
-        session.close()
-        return True
 
     def restore_prompt(self, prompt_id: str) -> bool:
         """
@@ -947,28 +1079,29 @@ class PromptRegistry:
             "Restored: True"
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=True
-        ).first()
-        
-        if not prompt:
+        try:
+            prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
+                is_deleted=True
+            ).first()
+            
+            if not prompt:
+                return False
+                
+            prompt.is_deleted = False
+            
+            # Record restoration
+            if prompt.meta is None:
+                prompt.meta = {}
+                
+            prompt.meta["restored"] = {
+                "at": datetime.utcnow().isoformat()
+            }
+            
+            session.commit()
+            return True
+        finally:
             session.close()
-            return False
-            
-        prompt.is_deleted = False
-        
-        # Record restoration
-        if prompt.meta is None:
-            prompt.meta = {}
-            
-        prompt.meta["restored"] = {
-            "at": datetime.utcnow().isoformat()
-        }
-        
-        session.commit()
-        session.close()
-        return True
 
     def delete_prompt_by_id(self, prompt_id: str) -> bool:
         """
@@ -986,16 +1119,17 @@ class PromptRegistry:
             "Deleted: True"
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
-        
-        if prompt:
-            session.delete(prompt)
-            session.commit()
-            session.close()
-            return True
+        try:
+            prompt = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
             
-        session.close()
-        return False
+            if prompt:
+                session.delete(prompt)
+                session.commit()
+                return True
+                
+            return False
+        finally:
+            session.close()
 
     def delete_project(self, project: str, use_soft_delete: bool = True) -> int:
         """
@@ -1014,23 +1148,24 @@ class PromptRegistry:
             "Deleted 15 prompts"
         """
         session = self.Session()
-        
-        if use_soft_delete:
-            # Soft delete - mark prompts as deleted
-            count = session.query(PromptORM).filter_by(
-                project=project,
-                is_deleted=False
-            ).update({
-                "is_deleted": True,
-                "alias": None  # Remove aliases
-            })
-        else:
-            # Hard delete - remove from database
-            count = session.query(PromptORM).filter_by(project=project).delete()
-            
-        session.commit()
-        session.close()
-        return count
+        try:
+            if use_soft_delete:
+                # Soft delete - mark prompts as deleted
+                count = session.query(PromptORM).filter_by(
+                    project=project,
+                    is_deleted=False
+                ).update({
+                    "is_deleted": True,
+                    "alias": None  # Remove aliases
+                })
+            else:
+                # Hard delete - remove from database
+                count = session.query(PromptORM).filter_by(project=project).delete()
+                
+            session.commit()
+            return count
+        finally:
+            session.close()
 
     def delete_prompts_by_project_task(
         self, 
@@ -1059,27 +1194,28 @@ class PromptRegistry:
             "Deleted 7 prompts"
         """
         session = self.Session()
-        
-        if use_soft_delete:
-            # Soft delete - mark prompts as deleted
-            count = session.query(PromptORM).filter_by(
-                project=project,
-                task=task,
-                is_deleted=False
-            ).update({
-                "is_deleted": True,
-                "alias": None  # Remove aliases
-            })
-        else:
-            # Hard delete - remove from database
-            count = session.query(PromptORM).filter_by(
-                project=project,
-                task=task
-            ).delete()
-            
-        session.commit()
-        session.close()
-        return count
+        try:
+            if use_soft_delete:
+                # Soft delete - mark prompts as deleted
+                count = session.query(PromptORM).filter_by(
+                    project=project,
+                    task=task,
+                    is_deleted=False
+                ).update({
+                    "is_deleted": True,
+                    "alias": None  # Remove aliases
+                })
+            else:
+                # Hard delete - remove from database
+                count = session.query(PromptORM).filter_by(
+                    project=project,
+                    task=task
+                ).delete()
+                
+            session.commit()
+            return count
+        finally:
+            session.close()
 
     def search_prompts(
         self, 
@@ -1114,47 +1250,52 @@ class PromptRegistry:
             "Found 12 matching prompts"
         """
         session = self.Session()
-        
-        # Base query
-        search = session.query(PromptORM).filter_by(is_deleted=False)
-        
-        # Apply project filter if provided
-        if project:
-            search = search.filter_by(project=project)
+        try:
+            # Base query
+            search = session.query(PromptORM).filter_by(is_deleted=False)
             
-        # Apply tag filters if provided
-        if tags:
-            for tag in tags:
-                # This would be more efficient with proper tag schema
-                tag_pattern = f"%\"{tag}\"%"  # Match in JSON array
-                search = search.filter(PromptORM.tags.ilike(tag_pattern))
-            
-        # Apply text search
-        search_pattern = f"%{query}%"
-        search = search.filter(
-            or_(
-                PromptORM.template.ilike(search_pattern),
-                PromptORM.task.ilike(search_pattern),
-                PromptORM.project.ilike(search_pattern),
-                PromptORM.prompt_id.ilike(search_pattern)
+            # Apply project filter if provided
+            if project:
+                search = search.filter_by(project=project)
+                
+            # Apply tag filters if provided
+            if tags:
+                for tag in tags:
+                    # This would be more efficient with proper tag schema
+                    tag_pattern = f"%\"{tag}\"%"  # Match in JSON array
+                    search = search.filter(PromptORM.tags.ilike(tag_pattern))
+                
+            # Apply text search
+            search_pattern = f"%{query}%"
+            search = search.filter(
+                or_(
+                    PromptORM.template.ilike(search_pattern),
+                    PromptORM.task.ilike(search_pattern),
+                    PromptORM.project.ilike(search_pattern),
+                    PromptORM.prompt_id.ilike(search_pattern)
+                )
             )
-        )
-        
-        # Get total count for pagination
-        total_count = search.count()
-        
-        # Apply pagination
-        search = search.order_by(
-            PromptORM.project,
-            PromptORM.task,
-            PromptORM.version.desc()
-        )
-        search = search.offset((page - 1) * page_size).limit(page_size)
-        
-        results = search.all()
-        session.close()
-        
-        return results, total_count
+            
+            # Get total count for pagination
+            total_count = search.count()
+            
+            # Apply pagination
+            search = search.order_by(
+                PromptORM.project,
+                PromptORM.task,
+                PromptORM.version.desc()
+            )
+            search = search.offset((page - 1) * page_size).limit(page_size)
+            
+            results = search.all()
+            
+            # Handle SQLAlchemy detached instance issue
+            for result in results:
+                session.expunge(result)
+                
+            return results, total_count
+        finally:
+            session.close()
 
     def bulk_tag_prompts(
         self, 
@@ -1183,52 +1324,54 @@ class PromptRegistry:
             "Modified 3 prompts"
         """
         session = self.Session()
-        count = 0
-        
-        for prompt_id in prompt_ids:
-            prompt = session.query(PromptORM).filter_by(
-                prompt_id=prompt_id,
-                is_deleted=False
-            ).first()
+        try:
+            count = 0
             
-            if not prompt:
-                continue
+            for prompt_id in prompt_ids:
+                prompt = session.query(PromptORM).filter_by(
+                    prompt_id=prompt_id,
+                    is_deleted=False
+                ).first()
                 
-            try:
-                current_tags = set(json.loads(prompt.tags or "[]"))
-                
-                if operation == "add":
-                    # Add new tags
-                    new_tags = list(current_tags | set(tags))
-                elif operation == "remove":
-                    # Remove specified tags
-                    new_tags = list(current_tags - set(tags))
-                elif operation == "set":
-                    # Replace with new tags
-                    new_tags = tags
-                else:
-                    raise ValueError(f"Unknown operation: {operation}")
+                if not prompt:
+                    continue
                     
-                prompt.tags = json.dumps(new_tags)
-                
-                # Update prompt_tags table
-                # First delete existing
-                session.query(PromptTagORM).filter_by(prompt_id=prompt_id).delete()
-                
-                # Add new tags
-                for tag in new_tags:
-                    if tag:
-                        prompt_tag = PromptTagORM(prompt_id=prompt_id, tag_name=tag)
-                        session.add(prompt_tag)
-                
-                count += 1
-            except Exception as e:
-                print(f"Error updating tags for {prompt_id}: {str(e)}")
-                continue
-                
-        session.commit()
-        session.close()
-        return count
+                try:
+                    current_tags = set(json.loads(prompt.tags or "[]"))
+                    
+                    if operation == "add":
+                        # Add new tags
+                        new_tags = list(current_tags | set(tags))
+                    elif operation == "remove":
+                        # Remove specified tags
+                        new_tags = list(current_tags - set(tags))
+                    elif operation == "set":
+                        # Replace with new tags
+                        new_tags = tags
+                    else:
+                        raise ValueError(f"Unknown operation: {operation}")
+                        
+                    prompt.tags = json.dumps(new_tags)
+                    
+                    # Update prompt_tags table
+                    # First delete existing
+                    session.query(PromptTagORM).filter_by(prompt_id=prompt_id).delete()
+                    
+                    # Add new tags
+                    for tag in new_tags:
+                        if tag:
+                            prompt_tag = PromptTagORM(prompt_id=prompt_id, tag_name=tag)
+                            session.add(prompt_tag)
+                    
+                    count += 1
+                except Exception as e:
+                    print(f"Error updating tags for {prompt_id}: {str(e)}")
+                    continue
+                    
+            session.commit()
+            return count
+        finally:
+            session.close()
 
     def render_prompt(
         self, 
@@ -1254,24 +1397,25 @@ class PromptRegistry:
             "Summarize this text: Climate change is a global challenge..."
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=False
-        ).first()
-        
-        if not prompt:
+        try:
+            prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
+                is_deleted=False
+            ).first()
+            
+            if not prompt:
+                return None
+                
+            # Start with the template
+            rendered = prompt.template
+            
+            # Replace all variables
+            for key, value in variables.items():
+                rendered = rendered.replace(f"{{{key}}}", str(value))
+                
+            return rendered
+        finally:
             session.close()
-            return None
-            
-        # Start with the template
-        rendered = prompt.template
-        
-        # Replace all variables
-        for key, value in variables.items():
-            rendered = rendered.replace(f"{{{key}}}", str(value))
-            
-        session.close()
-        return rendered
 
     def validate_template(self, template: str) -> Dict[str, Any]:
         """
@@ -1328,20 +1472,22 @@ class PromptRegistry:
             "Found 3 examples"
         """
         session = self.Session()
-        examples = session.query(ExampleORM).filter_by(prompt_id=prompt_id).all()
-        
-        result = []
-        for ex in examples:
-            result.append({
-                "id": ex.id,
-                "input": ex.input_text,
-                "output": ex.output_text,
-                "description": ex.description,
-                "created_at": ex.created_at
-            })
+        try:
+            examples = session.query(ExampleORM).filter_by(prompt_id=prompt_id).all()
             
-        session.close()
-        return result
+            result = []
+            for ex in examples:
+                result.append({
+                    "id": ex.id,
+                    "input": ex.input_text,
+                    "output": ex.output_text,
+                    "description": ex.description,
+                    "created_at": ex.created_at.isoformat() if ex.created_at else None
+                })
+                
+            return result
+        finally:
+            session.close()
 
     def add_example(
         self, 
@@ -1373,28 +1519,32 @@ class PromptRegistry:
             "Example added with ID: 42"
         """
         session = self.Session()
-        prompt = session.query(PromptORM).filter_by(
-            prompt_id=prompt_id,
-            is_deleted=False
-        ).first()
-        
-        if not prompt:
-            session.close()
-            return None
+        try:
+            prompt = session.query(PromptORM).filter_by(
+                prompt_id=prompt_id,
+                is_deleted=False
+            ).first()
             
-        example = ExampleORM(
-            prompt_id=prompt_id,
-            input_text=input_text,
-            output_text=output_text,
-            description=description
-        )
-        
-        session.add(example)
-        session.commit()
-        session.refresh(example)
-        session.close()
-        
-        return example
+            if not prompt:
+                return None
+                
+            example = ExampleORM(
+                prompt_id=prompt_id,
+                input_text=input_text,
+                output_text=output_text,
+                description=description
+            )
+            
+            session.add(example)
+            session.commit()
+            session.refresh(example)
+            
+            # Handle SQLAlchemy detached instance issue
+            result = copy.deepcopy(example)
+            session.expunge(example)
+            return result
+        finally:
+            session.close()
 
     def get_usage_stats(self) -> Dict[str, Any]:
         """
@@ -1409,35 +1559,36 @@ class PromptRegistry:
             "Total prompts: 157"
         """
         session = self.Session()
-        
-        stats = {
-            "total_prompts": session.query(PromptORM).count(),
-            "active_prompts": session.query(PromptORM).filter_by(is_deleted=False).count(),
-            "deleted_prompts": session.query(PromptORM).filter_by(is_deleted=True).count(),
-            "total_projects": len(set([p[0] for p in session.query(PromptORM.project).distinct() if p[0]])),
-            "total_tasks": len(set([p[0] for p in session.query(PromptORM.task).distinct() if p[0]])),
-            "prompts_with_aliases": session.query(PromptORM).filter(
-                PromptORM.alias.isnot(None),
-                PromptORM.is_deleted == False
-            ).count(),
-            "average_template_length": session.query(func.avg(func.length(PromptORM.template))).scalar(),
-            "total_examples": session.query(ExampleORM).count()
-        }
-        
-        # Get most active projects
-        project_counts = Counter()
-        for p in session.query(PromptORM.project).all():
-            if p[0]:
-                project_counts[p[0]] += 1
-                
-        stats["most_active_projects"] = project_counts.most_common(5)
-        
-        # Get tag stats
-        tag_stats = self.get_tag_stats()
-        stats["top_tags"] = tag_stats.most_common(10)
-        
-        session.close()
-        return stats
+        try:
+            stats = {
+                "total_prompts": session.query(PromptORM).count(),
+                "active_prompts": session.query(PromptORM).filter_by(is_deleted=False).count(),
+                "deleted_prompts": session.query(PromptORM).filter_by(is_deleted=True).count(),
+                "total_projects": len(set([p[0] for p in session.query(PromptORM.project).distinct() if p[0]])),
+                "total_tasks": len(set([p[0] for p in session.query(PromptORM.task).distinct() if p[0]])),
+                "prompts_with_aliases": session.query(PromptORM).filter(
+                    PromptORM.alias.isnot(None),
+                    PromptORM.is_deleted == False
+                ).count(),
+                "average_template_length": session.query(func.avg(func.length(PromptORM.template))).scalar(),
+                "total_examples": session.query(ExampleORM).count()
+            }
+            
+            # Get most active projects
+            project_counts = Counter()
+            for p in session.query(PromptORM.project).all():
+                if p[0]:
+                    project_counts[p[0]] += 1
+                    
+            stats["most_active_projects"] = project_counts.most_common(5)
+            
+            # Get tag stats
+            tag_stats = self.get_tag_stats()
+            stats["top_tags"] = tag_stats.most_common(10)
+            
+            return stats
+        finally:
+            session.close()
 
     def export_prompts(
         self, 
@@ -1460,57 +1611,67 @@ class PromptRegistry:
             "Exported data length: 24560 bytes"
         """
         session = self.Session()
-        
-        # Build query
-        query = session.query(PromptORM).filter_by(is_deleted=False)
-        if project:
-            query = query.filter_by(project=project)
+        try:
+            # Build query
+            query = session.query(PromptORM).filter_by(is_deleted=False)
+            if project:
+                query = query.filter_by(project=project)
+                
+            prompts = query.all()
             
-        prompts = query.all()
-        
-        # Convert to serializable format
-        export_data = []
-        for p in prompts:
-            try:
-                # Get examples for this prompt
-                examples = []
-                for ex in session.query(ExampleORM).filter_by(prompt_id=p.prompt_id).all():
-                    examples.append({
-                        "input": ex.input_text,
-                        "output": ex.output_text,
-                        "description": ex.description
-                    })
-                
-                prompt_data = {
-                    "prompt_id": p.prompt_id,
-                    "project": p.project,
-                    "task": p.task,
-                    "template": p.template,
-                    "version": p.version,
-                    "alias": p.alias,
-                    "tags": json.loads(p.tags or "[]"),
-                    "meta": p.meta,
-                    "parent_id": p.parent_id,
-                    "template_variables": p.template_variables,
-                    "created_at": p.created_at.isoformat() if p.created_at else None,
-                    "updated_at": p.updated_at.isoformat() if p.updated_at else None,
-                    "updated_by": p.updated_by,
-                    "examples": examples
-                }
-                export_data.append(prompt_data)
-            except Exception as e:
-                print(f"Error exporting prompt {p.prompt_id}: {str(e)}")
-                
-        session.close()
-        
-        # Format the output
-        if format.lower() == "json":
-            return json.dumps(export_data, indent=2)
-        elif format.lower() == "yaml":
-            import yaml
-            return yaml.dump(export_data, default_flow_style=False)
-        else:
-            raise ValueError(f"Unsupported export format: {format}")
+            # Convert to serializable format
+            export_data = []
+            for p in prompts:
+                try:
+                    # Get examples for this prompt
+                    examples = []
+                    for ex in session.query(ExampleORM).filter_by(prompt_id=p.prompt_id).all():
+                        examples.append({
+                            "input": ex.input_text,
+                            "output": ex.output_text,
+                            "description": ex.description
+                        })
+                    
+                    # Convert datetime objects to strings
+                    created_at = p.created_at.isoformat() if p.created_at else None
+                    updated_at = p.updated_at.isoformat() if p.updated_at else None
+                    
+                    # Ensure tags are properly parsed
+                    try:
+                        tags = json.loads(p.tags or "[]")
+                    except:
+                        tags = []
+                    
+                    prompt_data = {
+                        "prompt_id": p.prompt_id,
+                        "project": p.project,
+                        "task": p.task,
+                        "template": p.template,
+                        "version": p.version,
+                        "alias": p.alias,
+                        "tags": tags,
+                        "meta": p.meta or {},
+                        "parent_id": p.parent_id,
+                        "template_variables": p.template_variables or [],
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "updated_by": p.updated_by,
+                        "examples": examples
+                    }
+                    export_data.append(prompt_data)
+                except Exception as e:
+                    print(f"Error exporting prompt {p.prompt_id}: {str(e)}")
+                    
+            # Format the output
+            if format.lower() == "json":
+                return json.dumps(export_data, indent=2)
+            elif format.lower() == "yaml":
+                import yaml
+                return yaml.dump(export_data, default_flow_style=False)
+            else:
+                raise ValueError(f"Unsupported export format: {format}")
+        finally:
+            session.close()
 
     def import_prompts(
         self, 
@@ -1538,16 +1699,33 @@ class PromptRegistry:
         if format.lower() == "json":
             try:
                 prompts_data = json.loads(data)
+                # Handle empty array
+                if not prompts_data:
+                    prompts_data = []
             except Exception as e:
                 return {"error": f"Invalid JSON: {str(e)}"}
         elif format.lower() == "yaml":
             try:
                 import yaml
                 prompts_data = yaml.safe_load(data)
+                # Handle empty YAML document
+                if not prompts_data:
+                    prompts_data = []
             except Exception as e:
                 return {"error": f"Invalid YAML: {str(e)}"}
         else:
             return {"error": f"Unsupported import format: {format}"}
+            
+        # Handle case where data isn't a list
+        if not isinstance(prompts_data, list):
+            return {
+                "error": f"Expected a list of prompts, got {type(prompts_data).__name__}",
+                "total": 0,
+                "imported": 0,
+                "skipped": 0,
+                "errors": 1,
+                "error_details": [f"Expected a list of prompts, got {type(prompts_data).__name__}"]
+            }
             
         # Stats for import results
         stats = {
@@ -1558,62 +1736,71 @@ class PromptRegistry:
             "error_details": []
         }
         
+        # Return early if there's nothing to import
+        if not prompts_data:
+            return stats
+            
         session = self.Session()
-        
-        for prompt_data in prompts_data:
-            try:
-                prompt_id = prompt_data.get("prompt_id")
-                
-                # Check if prompt already exists
-                if skip_existing and prompt_id:
-                    existing = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
-                    if existing:
-                        stats["skipped"] += 1
-                        continue
-                        
-                # Create a new prompt with imported data
-                new_prompt = PromptORM(
-                    prompt_id=prompt_id or str(uuid.uuid4()),
-                    project=prompt_data.get("project"),
-                    task=prompt_data.get("task", "imported"),
-                    template=prompt_data.get("template", ""),
-                    version=prompt_data.get("version", 1),
-                    alias=prompt_data.get("alias"),
-                    tags=json.dumps(prompt_data.get("tags", [])),
-                    meta=prompt_data.get("meta", {}),
-                    parent_id=prompt_data.get("parent_id"),
-                    template_variables=prompt_data.get("template_variables", []),
-                    is_deleted=False,
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
-                    updated_by=prompt_data.get("updated_by", "import")
-                )
-                
-                session.add(new_prompt)
-                
-                # Process tags
-                for tag in prompt_data.get("tags", []):
-                    if tag:
-                        prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
-                        session.add(prompt_tag)
-                        
-                # Process examples
-                for ex in prompt_data.get("examples", []):
-                    example = ExampleORM(
-                        prompt_id=new_prompt.prompt_id,
-                        input_text=ex.get("input", ""),
-                        output_text=ex.get("output", ""),
-                        description=ex.get("description")
+        try:
+            for prompt_data in prompts_data:
+                try:
+                    prompt_id = prompt_data.get("prompt_id")
+                    
+                    # Check if prompt already exists
+                    if skip_existing and prompt_id:
+                        existing = session.query(PromptORM).filter_by(prompt_id=prompt_id).first()
+                        if existing:
+                            stats["skipped"] += 1
+                            continue
+                            
+                    # Create a new prompt with imported data
+                    new_prompt = PromptORM(
+                        prompt_id=prompt_id or str(uuid.uuid4()),
+                        project=prompt_data.get("project"),
+                        task=prompt_data.get("task", "imported"),
+                        template=prompt_data.get("template", ""),
+                        version=prompt_data.get("version", 1),
+                        alias=prompt_data.get("alias"),
+                        tags=json.dumps(prompt_data.get("tags", [])),
+                        meta=prompt_data.get("meta", {}),
+                        parent_id=prompt_data.get("parent_id"),
+                        template_variables=prompt_data.get("template_variables", []),
+                        is_deleted=False,
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                        updated_by=prompt_data.get("updated_by", "import")
                     )
-                    session.add(example)
-                
-                stats["imported"] += 1
-                
-            except Exception as e:
-                stats["errors"] += 1
-                stats["error_details"].append(str(e))
-                
-        session.commit()
-        session.close()
-        
-        return stats
+                    
+                    session.add(new_prompt)
+                    
+                    # Process tags
+                    for tag in prompt_data.get("tags", []):
+                        if tag:
+                            prompt_tag = PromptTagORM(prompt_id=new_prompt.prompt_id, tag_name=tag)
+                            session.add(prompt_tag)
+                            
+                    # Process examples
+                    for ex in prompt_data.get("examples", []):
+                        example = ExampleORM(
+                            prompt_id=new_prompt.prompt_id,
+                            input_text=ex.get("input", ""),
+                            output_text=ex.get("output", ""),
+                            description=ex.get("description")
+                        )
+                        session.add(example)
+                    
+                    stats["imported"] += 1
+                    
+                except Exception as e:
+                    stats["errors"] += 1
+                    stats["error_details"].append(str(e))
+                    
+            session.commit()
+            return stats
+        except Exception as e:
+            session.rollback()
+            stats["errors"] += 1
+            stats["error_details"].append(f"Database error: {str(e)}")
+            return stats
+        finally:
+            session.close()

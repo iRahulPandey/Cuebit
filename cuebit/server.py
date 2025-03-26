@@ -1,11 +1,45 @@
+"""
+FastAPI server for Cuebit prompt management.
+
+This module provides a REST API for accessing and managing
+Cuebit prompts, with endpoints for listing, creating, updating,
+and comparing prompt versions.
+"""
+
 from fastapi import FastAPI, HTTPException, Body, Query, Path, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field
 from datetime import datetime
 import json
+import os
+import copy
 
-from cuebit.registry import PromptRegistry, PromptORM
+from cuebit.registry import PromptRegistry, PromptORM, ExampleORM
+
+# Helper functions for serialization
+def orm_to_dict(orm_obj):
+    """
+    Convert SQLAlchemy ORM object to a dictionary for serialization.
+    """
+    if not orm_obj:
+        return None
+        
+    data = {}
+    for column in orm_obj.__table__.columns:
+        value = getattr(orm_obj, column.name)
+        
+        # Handle special types
+        if isinstance(value, datetime):
+            value = value.isoformat()
+            
+        data[column.name] = value
+        
+    return data
+
+def convert_orm_list(orm_list):
+    """Convert a list of ORM objects to a list of dictionaries."""
+    return [orm_to_dict(item) for item in orm_list]
 
 # Constants
 API_VERSION = "v1"
@@ -28,14 +62,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize registry
+# Initialize registry using the improved initialization
+# It will respect CUEBIT_DB_PATH environment variable
+# or use the standard data directory
 registry = PromptRegistry()
 
 # --- Pydantic Models ---
 
 class PaginatedResponse(BaseModel):
     """Response model for paginated results."""
-    items: List[Any]
+    items: List[Dict[str, Any]]
     total: int
     page: int
     page_size: int
@@ -90,28 +126,33 @@ class PromptOut(BaseModel):
     task: str
     template: str
     version: int
-    alias: Optional[str]
-    project: Optional[str]
+    alias: Optional[str] = None
+    project: Optional[str] = None
     tags: str
     meta: Dict[str, Any]
-    parent_id: Optional[str]
+    parent_id: Optional[str] = None
     template_variables: List[str] = []
-    created_at: datetime
-    updated_at: datetime
-    updated_by: Optional[str]
+    created_at: Union[datetime, str]
+    updated_at: Union[datetime, str]
+    updated_by: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # This replaces orm_mode in Pydantic v2
+
+    @classmethod
+    def from_orm(cls, obj):
+        """Create a model instance from an ORM object."""
+        if obj is None:
+            return None
+        # Convert ORM object to dict
+        data = orm_to_dict(obj)
+        # Return instance
+        return cls(**data)
 
 class AliasCreate(BaseModel):
     """Input model for creating an alias."""
     alias: str
     overwrite: bool = True
-
-class VariableValue(BaseModel):
-    """Input model for a prompt variable value."""
-    name: str
-    value: str
 
 class PromptRenderRequest(BaseModel):
     """Input model for rendering a prompt with variables."""
@@ -149,7 +190,7 @@ class ExampleOut(BaseModel):
     input: str
     output: str
     description: Optional[str]
-    created_at: datetime
+    created_at: Union[datetime, str]
 
 # --- Project Endpoints ---
 
@@ -162,7 +203,7 @@ def list_projects():
 
 @app.get(
     f"{API_PREFIX}/projects/{{project}}/prompts", 
-    response_model=List[PromptOut],
+    response_model=List[Dict[str, Any]],
     summary="List prompts in a project",
     description="Returns all prompts belonging to a specific project."
 )
@@ -171,7 +212,8 @@ def get_project_prompts(
     include_deleted: bool = Query(False, description="Whether to include soft-deleted prompts")
 ):
     """Return all prompts belonging to a specific project."""
-    return registry.list_prompts_by_project(project, include_deleted=include_deleted)
+    prompts = registry.list_prompts_by_project(project, include_deleted=include_deleted)
+    return [orm_to_dict(p) for p in prompts]
 
 @app.delete(
     f"{API_PREFIX}/projects/{{project}}",
@@ -231,8 +273,11 @@ def list_prompts(
     
     pages = (total + page_size - 1) // page_size  # Ceiling division
     
+    # Convert ORM objects to dictionaries
+    prompt_dicts = [orm_to_dict(p) for p in prompts]
+    
     return {
-        "items": prompts,
+        "items": prompt_dicts,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -241,7 +286,7 @@ def list_prompts(
 
 @app.post(
     f"{API_PREFIX}/prompts", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Create a prompt",
     description="Register a new prompt template with metadata."
 )
@@ -261,7 +306,7 @@ def create_prompt(
             for ex in prompt.examples
         ]
         
-    return registry.register_prompt(
+    result = registry.register_prompt(
         task=prompt.task,
         template=prompt.template,
         meta=prompt.meta,
@@ -270,10 +315,13 @@ def create_prompt(
         updated_by=prompt.updated_by,
         examples=examples_list
     )
+    
+    # Return as dictionary to avoid serialization issues
+    return orm_to_dict(result)
 
 @app.get(
     f"{API_PREFIX}/prompts/{{prompt_id}}", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Get a prompt",
     description="Retrieve a specific prompt by its ID."
 )
@@ -285,11 +333,11 @@ def get_prompt(
     prompt = registry.get_prompt(prompt_id, include_deleted=include_deleted)
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    return prompt
+    return orm_to_dict(prompt)
 
 @app.put(
     f"{API_PREFIX}/prompts/{{prompt_id}}", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Update a prompt",
     description="Update a prompt, creating a new version."
 )
@@ -321,11 +369,11 @@ def update_prompt(
     
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    return prompt
+    return orm_to_dict(prompt)
 
 @app.post(
     f"{API_PREFIX}/prompts/{{prompt_id}}/alias", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Set alias for prompt",
     description="Set an alias for a specific prompt version."
 )
@@ -342,11 +390,11 @@ def alias_prompt(
     
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    return prompt
+    return orm_to_dict(prompt)
 
 @app.get(
     f"{API_PREFIX}/prompts/alias/{{alias}}", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Get prompt by alias",
     description="Retrieve a prompt using its alias."
 )
@@ -357,7 +405,7 @@ def get_prompt_by_alias(
     prompt = registry.get_prompt_by_alias(alias)
     if not prompt:
         raise HTTPException(status_code=404, detail="Alias not found")
-    return prompt
+    return orm_to_dict(prompt)
 
 @app.delete(
     f"{API_PREFIX}/prompts/{{prompt_id}}",
@@ -422,7 +470,7 @@ def validate_template(
 
 @app.get(
     f"{API_PREFIX}/prompts/{{prompt_id}}/history", 
-    response_model=List[PromptOut],
+    response_model=List[Dict[str, Any]],
     summary="Get prompt history",
     description="Get version history for a prompt's project/task."
 )
@@ -441,7 +489,8 @@ def get_prompt_history(
         include_deleted=include_deleted
     )
     
-    return history
+    # Convert to dictionaries for serialization
+    return [orm_to_dict(p) for p in history]
 
 @app.get(
     f"{API_PREFIX}/prompts/{{prompt_id}}/lineage",
@@ -456,7 +505,14 @@ def get_prompt_lineage(
     lineage = registry.get_prompt_lineage(prompt_id, include_deleted=include_deleted)
     if not lineage["current"]:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    return lineage
+    
+    # Convert ORM objects to dictionaries for serialization
+    result = {
+        "current": orm_to_dict(lineage["current"]),
+        "ancestors": [orm_to_dict(p) for p in lineage["ancestors"]],
+        "descendants": [orm_to_dict(p) for p in lineage["descendants"]]
+    }
+    return result
 
 @app.post(
     f"{API_PREFIX}/prompts/compare",
@@ -474,7 +530,7 @@ def compare_prompts(
 
 @app.post(
     f"{API_PREFIX}/prompts/{{prompt_id}}/rollback", 
-    response_model=PromptOut,
+    response_model=Dict[str, Any],
     summary="Rollback to version",
     description="Create a new version by copying an old version (rollback)."
 )
@@ -486,7 +542,7 @@ def rollback_prompt(
     new_prompt = registry.rollback_to_version(prompt_id, updated_by=updated_by)
     if not new_prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    return new_prompt
+    return orm_to_dict(new_prompt)
 
 @app.post(
     f"{API_PREFIX}/prompts/search",
@@ -507,8 +563,11 @@ def search_prompts(
     
     pages = (total + query.page_size - 1) // query.page_size  # Ceiling division
     
+    # Convert to dictionaries for serialization
+    result_dicts = [orm_to_dict(p) for p in results]
+    
     return {
-        "items": results,
+        "items": result_dicts,
         "total": total,
         "page": query.page,
         "page_size": query.page_size,
@@ -536,7 +595,7 @@ def bulk_tag_prompts(
 
 @app.get(
     f"{API_PREFIX}/prompts/{{prompt_id}}/examples",
-    response_model=List[ExampleOut],
+    response_model=List[Dict[str, Any]],
     summary="Get prompt examples",
     description="Get input/output examples for a prompt."
 )
@@ -545,7 +604,7 @@ def get_examples(
 ):
     """Get examples for a prompt."""
     examples = registry.get_examples(prompt_id)
-    return examples
+    return examples  # Already returned as dictionaries by the registry
 
 @app.post(
     f"{API_PREFIX}/prompts/{{prompt_id}}/examples",
@@ -567,13 +626,13 @@ def add_example(
     if not result:
         raise HTTPException(status_code=404, detail="Prompt not found")
         
-    return {
+    return result.to_dict() if hasattr(result, 'to_dict') else {
         "id": result.id,
         "prompt_id": prompt_id,
         "input": result.input_text,
         "output": result.output_text,
         "description": result.description,
-        "created_at": result.created_at
+        "created_at": result.created_at.isoformat() if result.created_at else None
     }
 
 # --- Stats & Import/Export ---
@@ -634,7 +693,7 @@ def import_prompts(
 @app.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "version": "1.0"}
+    return {"status": "ok", "database_url": registry.db_url, "version": "1.0"}
 
 @app.get("/")
 def root():
@@ -642,5 +701,6 @@ def root():
     return {
         "message": "Welcome to Cuebit API", 
         "docs": f"{API_PREFIX}/docs",
-        "version": "1.0"
+        "version": "1.0",
+        "database_url": registry.db_url
     }

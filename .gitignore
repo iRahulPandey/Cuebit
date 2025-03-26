@@ -4,3 +4,7 @@ cuebit/__pycache__
 .vscode
 poetry.lock
 .env
+tests/__pycache__
+test_env_db.db
+.coverage
+.pytest_cache

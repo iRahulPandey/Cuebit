@@ -1,19 +1,103 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuebit"
-version = "0.1.0"
-description = "Prompt Template Manager with CLI and FastAPI UI"
+version = "0.2.0"
+description = "Prompt Versioning and Management for GenAI"
 readme = "README.md"
-requires-python = ">=3.8"
-dependencies = [
-    "fastapi",
-    "uvicorn",
-    "sqlalchemy",
-    "pydantic",
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
 ]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["prompt-engineering", "llm", "ai", "genai", "version-control"]
+requires-python = ">=3.7"
+dependencies = [
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "sqlalchemy>=1.4.0",
+    "streamlit>=1.10.0",
+    "pandas>=1.0.0",
+    "altair>=4.0.0",
+    "pydantic>=1.8.0",
+    "appdirs>=1.4.4",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "fastapi>=0.68.0",
+    "httpx>=0.23.0",
+    "black>=22.0.0",
+    "isort>=5.10.0",
+    "mypy>=0.950",
+    "build>=0.7.0",
+    "twine>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/cuebit"
+Issues = "https://github.com/yourusername/cuebit/issues"
+Documentation = "https://github.com/yourusername/cuebit#readme"
 
 [project.scripts]
 cuebit = "cuebit.cli:main"
+
+[tool.setuptools]
+packages = ["cuebit"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"cuebit" = ["py.typed", "*.py", "dashboard.py"]
+"*" = ["*.md", "*.py"]
+
+[tool.black]
+line-length = 88
+target-version = ["py37", "py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.7"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+python_classes = "Test*"
+addopts = "--cov=cuebit"
+
+[tool.coverage.run]
+source = ["cuebit"]
+omit = ["*/tests/*", "*/examples/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "if TYPE_CHECKING:"
+]

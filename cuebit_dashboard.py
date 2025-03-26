@@ -1,4 +1,11 @@
-# cuebit_dashboard.py
+"""
+Streamlit dashboard for Cuebit prompt management.
+
+This dashboard provides a visual interface for managing and exploring
+prompts in the Cuebit registry, with features for editing, comparing,
+and visualizing prompt versions.
+"""
+
 import streamlit as st
 import json
 import re
@@ -7,7 +14,6 @@ from collections import Counter
 from datetime import datetime, timedelta
 import pandas as pd
 import altair as alt
-import requests
 import os
 import tempfile
 
@@ -22,6 +28,9 @@ st.set_page_config(
 
 # Initialize registry
 registry = PromptRegistry()
+
+# Print DB URL during startup to help with troubleshooting
+print(f"Using database at: {registry.db_url}")
 
 # Add custom CSS
 st.markdown("""
@@ -71,7 +80,7 @@ st.markdown("""
 st.sidebar.title("🧠 Cuebit")
 st.sidebar.caption("Prompt Management System")
 
-# Remove "Test Lab" from navigation options
+# Navigation options
 nav_options = [
     "📊 Dashboard", 
     "🗂️ Prompt Explorer", 
@@ -79,6 +88,9 @@ nav_options = [
     "📈 Version History", 
     "🔄 Import/Export"
 ]
+
+# Database location
+st.sidebar.caption(f"DB: {registry.db_url}")
 
 nav_selection = st.sidebar.radio("Navigation", nav_options)
 
@@ -242,7 +254,7 @@ def render_prompt_detail(prompt_id):
     # Add a back button at the top
     if st.button("← Back to Prompt Explorer", key="back_button_top"):
         st.session_state.pop("selected_prompt", None)
-        st.rerun()  # Updated from experimental_rerun
+        st.rerun()
     
     # Get lineage information
     lineage = registry.get_prompt_lineage(prompt_id)
@@ -315,29 +327,29 @@ def render_prompt_detail(prompt_id):
         if st.button("Edit", key=f"edit_{prompt_id}"):
             st.session_state["edit_prompt"] = prompt_id
             st.session_state.pop("selected_prompt", None)
-            st.rerun()  # Updated from experimental_rerun
+            st.rerun()
             
     with col2:
         if st.button("Set Alias", key=f"alias_{prompt_id}"):
             st.session_state["alias_prompt"] = prompt_id
             st.session_state.pop("selected_prompt", None)
-            st.rerun()  # Updated from experimental_rerun
+            st.rerun()
             
     with col3:
-        # Removed the Test button since we're removing the Test Lab
-        pass
+        if st.button("Copy ID", key=f"copy_{prompt_id}"):
+            st.code(prompt_id)
             
     with col4:
         if st.button("Delete", key=f"delete_{prompt_id}"):
             if registry.soft_delete_prompt(prompt_id):
                 st.success("Prompt deleted successfully")
                 st.session_state.pop("selected_prompt", None)
-                st.rerun()  # Updated from experimental_rerun
+                st.rerun()
     
     # Add another back button at the bottom for better UX
     if st.button("← Back to Prompt Explorer", key="back_button_bottom"):
         st.session_state.pop("selected_prompt", None)
-        st.rerun()  # Updated from experimental_rerun
+        st.rerun()
 
 def prompt_builder():
     """Prompt builder component."""
@@ -460,7 +472,7 @@ def prompt_builder():
             
             if st.button("Remove Example", key=f"remove_ex_{i}"):
                 st.session_state.builder_form["examples"].pop(i)
-                st.rerun()  # Updated from experimental_rerun
+                st.rerun()
     
     # Add new example
     with st.expander("Add Example"):
@@ -474,7 +486,7 @@ def prompt_builder():
                 "input": ex_input,
                 "output": ex_output
             })
-            st.rerun()  # Updated from experimental_rerun
+            st.rerun()
     
     # Preview rendered prompt
     if variables and template:
@@ -585,7 +597,7 @@ def prompt_builder():
                 "updated_by": "",
                 "examples": []
             }
-            st.rerun()  # Updated from experimental_rerun
+            st.rerun()
 
 def set_alias_form():
     """Form for setting an alias on a prompt."""
@@ -614,14 +626,14 @@ def set_alias_form():
                 if updated:
                     st.success(f"Alias '{alias}' set for prompt v{prompt.version}")
                     st.session_state.pop("alias_prompt", None)
-                    st.rerun()  # Updated from experimental_rerun
+                    st.rerun()
                 else:
                     st.error("Failed to set alias")
     
     with col2:
         if st.button("Cancel"):
             st.session_state.pop("alias_prompt", None)
-            st.rerun()  # Updated from experimental_rerun
+            st.rerun()
 
 def prompt_explorer():
     """Prompt explorer component."""
@@ -717,7 +729,7 @@ def prompt_explorer():
                         with col4:
                             if st.button("View", key=f"view_{p.prompt_id}"):
                                 st.session_state["selected_prompt"] = p.prompt_id
-                                st.rerun()  # Updated from experimental_rerun
+                                st.rerun()
                     
                     # Add separator between tasks
                     st.markdown("---")
@@ -930,4 +942,4 @@ else:  # Default to Dashboard
 
 # Show footer
 st.markdown("---")
-st.markdown("Cuebit Prompt Manager | v1.0")
+st.markdown("Cuebit Prompt Manager | v0.2.0")

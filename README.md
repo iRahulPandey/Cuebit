@@ -2,6 +2,8 @@
 
 Cuebit is an open-source, local-first prompt registry and version control system designed for GenAI development teams — complete with version tracking, version history, lineage tracking, aliases, tagging, and an interactive dashboard.
 
+![alt text](<Cuebit Architecture.png>)
+
 ---
 
 ## ✨ Features

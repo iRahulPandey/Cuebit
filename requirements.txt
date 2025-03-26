@@ -1,0 +1,17 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+sqlalchemy==1.4.50
+streamlit==1.24.0
+pandas==2.0.3
+altair==5.1.2
+pydantic==1.10.13  # Using pydantic v1 for compatibility
+appdirs==1.4.4
+pyyaml==6.0
+pytest==7.4.3
+pytest-cov==4.1.0
+httpx==0.25.1
+black==23.11.0
+isort==5.12.0
+build==1.0.3
+wheel==0.41.3
+setuptools==68.2.2

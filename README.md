@@ -4,8 +4,6 @@ Cuebit is an open-source, local-first prompt registry and version control system
 
 ![alt text](<Cuebit Highlevel Overview.png>)
 
----
-
 ## ✨ Features
 
 - 🔐 **Prompt version control** with full history and lineage tracking
@@ -22,30 +20,33 @@ Cuebit is an open-source, local-first prompt registry and version control system
 - 👤 **Audit trail**: `created_at`, `updated_at`, `updated_by`
 - 📤 **Import/Export** functionality for backup and sharing
 
----
-
 ## 📦 Installation
 
 ```bash
-# Clone the repository
+# Install from PyPI
+pip install cuebit
+
+# Or install from source
 git clone https://github.com/iRahulPandey/Cuebit.git
 cd cuebit
-
-# Install the package
 pip install -e .
 ```
 
-Make sure you have the required dependencies:
-
-```bash
-pip install fastapi uvicorn sqlalchemy streamlit pandas altair pydantic
-```
-
----
-
 ## 🚀 Getting Started
 
-### 🧪 Registering a Prompt
+### 🌱 Initializing Cuebit
+
+```bash
+# Initialize the Cuebit prompt registry
+cuebit init
+
+# Optionally specify a custom data directory
+cuebit init --data-dir /path/to/your/data
+```
+
+Cuebit automatically stores its database in a standard user data directory. You can also set the `CUEBIT_DB_PATH` environment variable to specify a custom database location.
+
+### 🧪 Registering a Prompt in Python
 
 ```python
 from cuebit.registry import PromptRegistry
@@ -93,24 +94,43 @@ registry.add_example(
 )
 ```
 
-### 🔍 Comparing Versions
+### Using in a Streamlit App
 
 ```python
-comparison = registry.compare_versions(prompt_id_1, prompt_id_2)
-print(f"Template differences: {len(comparison['template_diff'])} lines")
-print(f"Added tags: {comparison['tags_changes']['added']}")
-```
+import streamlit as st
+from cuebit.registry import PromptRegistry
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-### 🔄 Rendering Prompts
+# Initialize registry - works with zero configuration!
+registry = PromptRegistry()
 
-```python
-rendered = registry.render_prompt(
-    prompt_id,
-    {"input": "Text to summarize..."}
+# Get prompt by alias
+prompt = registry.get_prompt_by_alias("summarizer-prod")
+
+# Create LangChain PromptTemplate
+prompt_template = PromptTemplate(
+    input_variables=["input_text"],
+    template=prompt.template
 )
-```
 
----
+# Initialize LangChain ChatOpenAI model
+llm = ChatOpenAI(
+    model=prompt.meta.get("model", "gpt-3.5-turbo"),
+    temperature=prompt.meta.get("temperature", 0.7),
+    max_tokens=prompt.meta.get("max_tokens", 500)
+)
+
+# Create LLM Chain
+summarization_chain = LLMChain(
+    llm=llm,
+    prompt=prompt_template
+)
+
+# Generate summary
+summary = summarization_chain.run(input_text="Your text to summarize")
+```
 
 ## 🧪 Streamlit Dashboard
 
@@ -124,8 +144,6 @@ The dashboard provides:
 - Version history with visual diffs
 - Import/Export functionality
 - Usage statistics
-
----
 
 ## 🔧 Command Line Interface
 
@@ -145,7 +163,7 @@ cuebit create prompt --task summarization \
     --project my-project --tags "prod,gpt-4"
 
 # Set an alias
-cuebit set-alias  summarizer-prod
+cuebit set-alias 123abc summarizer-prod
 
 # Render a prompt with variables
 cuebit render --alias summarizer-prod \
@@ -154,8 +172,6 @@ cuebit render --alias summarizer-prod \
 # Export prompts to JSON
 cuebit export --format json --file exports.json
 ```
-
----
 
 ## 📚 API Reference
 
@@ -177,33 +193,43 @@ cuebit export --format json --file exports.json
 
 ![alt text](<Cuebit Detailed Overview.png>)
 
----
+## 🔍 Advanced Configuration
 
-## 📁 Project Structure
+### Environment Variables
 
+- `CUEBIT_DB_PATH`: Set a custom database location (e.g., `sqlite:///path/to/your/prompts.db`)
+
+### Using With Different Database Backends
+
+Cuebit uses SQLAlchemy, so you can connect to different database backends:
+
+```python
+# PostgreSQL example
+registry = PromptRegistry("postgresql://user:password@localhost/cuebit")
+
+# MySQL example
+registry = PromptRegistry("mysql+pymysql://user:password@localhost/cuebit")
 ```
-cuebit/
-├── cuebit/
-│   ├── __init__.py
-│   ├── registry.py   # Core prompt management and versioning
-│   ├── server.py     # FastAPI server and API endpoints
-│   └── cli.py        # Command-line interface
-├── cuebit_dashboard.py  # Streamlit dashboard
-├── pyproject.toml    # Project metadata
-├── README.md
-└── e2e_example.py    # Example
-
-```
-
----
 
 ## 🛠️ Development
 
-To reinitialize the local SQLite DB (e.g. after schema change):
+To contribute:
 
 ```bash
-rm prompts.db
-python example.py  # regenerates DB and adds sample data
+# Clone the repository
+git clone https://github.com/iRahulPandey/Cuebit.git
+cd cuebit
+
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Build package
+python -m build
 ```
 
----
+## License
+
+MIT

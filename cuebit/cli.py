@@ -1,4 +1,11 @@
-# cuebit/cli.py
+"""
+Command-line interface for Cuebit prompt management.
+
+This module provides a CLI for managing Cuebit prompts,
+allowing users to create, list, update, and manage prompts
+through a command-line interface.
+"""
+
 import argparse
 import uvicorn
 import subprocess
@@ -27,7 +34,7 @@ class CuebitCLI:
         parser = argparse.ArgumentParser(
             description="Cuebit - Prompt Versioning and Management CLI",
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
+            epilog=r"""
             Examples:
             cuebit serve                              # Start the server and UI
             cuebit list projects                      # List all projects
@@ -39,8 +46,12 @@ class CuebitCLI:
             cuebit render --alias summarizer-prod \   # Render a prompt
                 --vars '{"input":"text to summarize"}'
             cuebit export --format json               # Export all prompts to JSON
-        """
+            """
         )
+        
+        # Add a new argument for database location
+        parser.add_argument("--db-path", type=str, 
+                           help="Database URL (overrides CUEBIT_DB_PATH environment variable)")
         
         subparsers = parser.add_subparsers(dest="command", help="Command to execute")
         
@@ -48,6 +59,7 @@ class CuebitCLI:
         serve_parser = subparsers.add_parser("serve", help="Start Cuebit server and UI")
         serve_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
         serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+        serve_parser.add_argument("--data-dir", type=str, help="Data directory for the server")
         
         # list command
         list_parser = subparsers.add_parser("list", help="List prompts or projects")
@@ -145,20 +157,58 @@ class CuebitCLI:
         # stats command
         subparsers.add_parser("stats", help="Show registry statistics")
         
+        # init command (new)
+        init_parser = subparsers.add_parser("init", help="Initialize a prompt registry")
+        init_parser.add_argument("--data-dir", type=str, help="Custom data directory for prompt registry")
+        
         return parser
     
-    def start_streamlit(self):
+    def start_streamlit(self, streamlit_env=None):
         """Start the Streamlit UI in a separate thread."""
-        dashboard_path = os.path.join(os.path.dirname(__file__), "..", "cuebit_dashboard.py")
-        return subprocess.Popen(["streamlit", "run", dashboard_path])
+        # Find the dashboard path relative to the package
+        import cuebit
+        package_dir = os.path.dirname(cuebit.__file__)
+        dashboard_path = os.path.join(package_dir, "..", "cuebit_dashboard.py")
+        
+        # If the file doesn't exist, try looking in the package directory
+        if not os.path.exists(dashboard_path):
+            dashboard_path = os.path.join(package_dir, "cuebit_dashboard.py")
+        
+        if not os.path.exists(dashboard_path):
+            print(f"Warning: Couldn't find dashboard at {dashboard_path}")
+            print(f"Package directory: {package_dir}")
+            # Try to find in current directory as a fallback
+            dashboard_path = "cuebit_dashboard.py"
+        
+        # Start the Streamlit process with the current environment including CUEBIT_DB_PATH
+        env = os.environ.copy()
+        if streamlit_env:
+            env.update(streamlit_env)
+            
+        return subprocess.Popen(["streamlit", "run", dashboard_path], env=env)
     
     def serve(self, args):
         """Start the server and UI."""
+        # Set up environment with correct database path if specified
+        streamlit_env = None
+        if args.db_path:
+            os.environ["CUEBIT_DB_PATH"] = args.db_path
+            streamlit_env = {"CUEBIT_DB_PATH": args.db_path}
+            
+        # Alternatively, if data_dir is specified, use that
+        if args.data_dir:
+            if not os.path.exists(args.data_dir):
+                os.makedirs(args.data_dir, exist_ok=True)
+            db_path = f"sqlite:///{os.path.join(args.data_dir, 'prompts.db')}"
+            os.environ["CUEBIT_DB_PATH"] = db_path
+            streamlit_env = {"CUEBIT_DB_PATH": db_path}
+        
         print(f"Starting Cuebit server on http://{args.host}:{args.port}")
+        print(f"Database URL: {self.registry.db_url}")
         print("Starting Streamlit UI...")
         
         # Start Streamlit in background
-        streamlit_process = self.start_streamlit()
+        streamlit_process = self.start_streamlit(streamlit_env)
         
         try:
             # Start FastAPI
@@ -381,9 +431,7 @@ class CuebitCLI:
             return
         
         # Render prompt
-        rendered = prompt.template
-        for key, value in variables.items():
-            rendered = rendered.replace(f"{{{key}}}", str(value))
+        rendered = self.registry.render_prompt(prompt.prompt_id, variables)
         
         print("Rendered Prompt:")
         print("---")
@@ -562,6 +610,7 @@ class CuebitCLI:
         print(f"Total tasks: {stats['total_tasks']}")
         print(f"Prompts with aliases: {stats['prompts_with_aliases']}")
         print(f"Total examples: {stats.get('total_examples', 0)}")
+        print(f"Database URL: {self.registry.db_url}")
         
         if stats.get("average_template_length"):
             print(f"Average template length: {stats['average_template_length']:.1f} characters")
@@ -576,10 +625,34 @@ class CuebitCLI:
             for tag, count in stats["top_tags"]:
                 print(f"- {tag}: {count} prompts")
     
+    def init_registry(self, args):
+        """Initialize a new prompt registry."""
+        if args.data_dir:
+            if not os.path.exists(args.data_dir):
+                os.makedirs(args.data_dir, exist_ok=True)
+            db_path = f"sqlite:///{os.path.join(args.data_dir, 'prompts.db')}"
+            os.environ["CUEBIT_DB_PATH"] = db_path
+            self.registry = PromptRegistry(db_url=db_path)
+            print(f"Initialized new registry at: {db_path}")
+        else:
+            print(f"Using default registry at: {self.registry.db_url}")
+            
+        # Confirm it's working by checking if we can connect to DB
+        try:
+            projects = self.registry.list_projects()
+            print(f"Registry initialized with {len(projects)} projects")
+        except Exception as e:
+            print(f"Error initializing registry: {str(e)}")
+            return
+    
     def run(self):
         """Run the CLI with the given arguments."""
         args = self.parser.parse_args()
         
+        # If db-path is specified, reinitialize the registry
+        if hasattr(args, 'db_path') and args.db_path:
+            self.registry = PromptRegistry(db_url=args.db_path)
+            
         if args.command is None:
             self.parser.print_help()
             return
@@ -626,6 +699,8 @@ class CuebitCLI:
             self.import_prompts(args)
         elif args.command == "stats":
             self.show_stats(args)
+        elif args.command == "init":
+            self.init_registry(args)
 
 
 def main():

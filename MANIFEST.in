@@ -1,0 +1,11 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include cuebit_dashboard.py
+include examples/*.py
+recursive-include examples *.py
+recursive-include cuebit *.py
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store

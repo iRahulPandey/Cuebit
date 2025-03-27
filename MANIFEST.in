@@ -1,8 +1,6 @@
 include LICENSE
 include README.md
 include pyproject.toml
-include cuebit_dashboard.py
-include examples/*.py
 recursive-include examples *.py
 recursive-include cuebit *.py
 global-exclude __pycache__

@@ -942,4 +942,4 @@ else:  # Default to Dashboard
 
 # Show footer
 st.markdown("---")
-st.markdown("Cuebit Prompt Manager | v0.2.0")
+st.markdown("Cuebit Prompt Manager | v0.2.1")

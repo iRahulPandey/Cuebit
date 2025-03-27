@@ -165,22 +165,16 @@ class CuebitCLI:
     
     def start_streamlit(self, streamlit_env=None):
         """Start the Streamlit UI in a separate thread."""
-        # Find the dashboard path relative to the package
+        # The dashboard is now part of the package
         import cuebit
         package_dir = os.path.dirname(cuebit.__file__)
-        dashboard_path = os.path.join(package_dir, "..", "cuebit_dashboard.py")
-        
-        # If the file doesn't exist, try looking in the package directory
-        if not os.path.exists(dashboard_path):
-            dashboard_path = os.path.join(package_dir, "cuebit_dashboard.py")
+        dashboard_path = os.path.join(package_dir, "dashboard.py")
         
         if not os.path.exists(dashboard_path):
-            print(f"Warning: Couldn't find dashboard at {dashboard_path}")
-            print(f"Package directory: {package_dir}")
-            # Try to find in current directory as a fallback
-            dashboard_path = "cuebit_dashboard.py"
+            print(f"Error: Could not find dashboard at {dashboard_path}")
+            return None
         
-        # Start the Streamlit process with the current environment including CUEBIT_DB_PATH
+        # Start the Streamlit process with the current environment
         env = os.environ.copy()
         if streamlit_env:
             env.update(streamlit_env)

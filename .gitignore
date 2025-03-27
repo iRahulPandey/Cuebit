@@ -8,3 +8,6 @@ tests/__pycache__
 test_env_db.db
 .coverage
 .pytest_cache
+.pypirc
+cuebit-0.2.0-py3-none-any.whl
+cuebit-0.2.0.tar.gz
